@@ -608,12 +608,25 @@ type Runner struct {
 	NumThread int   `json:"num_thread,omitempty"`
 
 	// KVCacheType allows per-request override of the OLLAMA_KV_CACHE_TYPE env.
+	// Shortcut: setting this applies the same cache type to both K and V.
 	// Valid values: "f16", "q8_0", "q4_0", "q5_0", "q5_1", "iq4_nl".
-	// Empty string = use OLLAMA_KV_CACHE_TYPE env (default behavior).
+	// Empty string = fall back to KCacheType/VCacheType or OLLAMA_KV_CACHE_TYPE.
 	// Because this is part of [Runner], a request that asks for a different
 	// cache type than the currently loaded model will trigger a reload via
 	// the scheduler's needsReload() DeepEqual check on api.Runner.
 	KVCacheType string `json:"kv_cache_type,omitempty"`
+
+	// KCacheType and VCacheType allow the K and V caches to be configured
+	// independently (llama.cpp's --cache-type-k / --cache-type-v). K tends
+	// to be more sensitive to quantization than V, so a common recipe is
+	// K=q8_0 + V=q4_0 to trade V memory for K quality.
+	//
+	// Valid values (both fields): "f16", "q8_0", "q4_0", "q5_0", "q5_1",
+	//   "iq4_nl".
+	// When both KCacheType and VCacheType are unset, KVCacheType (or
+	// OLLAMA_KV_CACHE_TYPE) is used as a symmetric fallback.
+	KCacheType string `json:"k_cache_type,omitempty"`
+	VCacheType string `json:"v_cache_type,omitempty"`
 }
 
 // EmbedRequest is the request passed to [Client.Embed].

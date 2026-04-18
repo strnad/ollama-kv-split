@@ -596,7 +596,18 @@ func Decode(rs io.ReadSeeker, maxArraySize int) (*GGML, error) {
 	}, nil
 }
 
+// GraphSize returns a size estimate for the given context and cache type.
+// Thin symmetric wrapper around GraphSizeKV. For split K/V caches, call
+// GraphSizeKV directly.
 func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType string, useFlashAttention ml.FlashAttentionType) (kv []uint64, partialOffload, fullOffload uint64) {
+	return f.GraphSizeKV(context, batch, numParallel, kvCacheType, kvCacheType, useFlashAttention)
+}
+
+// GraphSizeKV returns a size estimate where K and V can use different cache
+// types, mirroring llama.cpp's --cache-type-k / --cache-type-v. Per-layer KV
+// allocation charges each side with its own bytes-per-element so the total is
+// exact even with asymmetric K/V heads (e.g. multi-query attention).
+func (f GGML) GraphSizeKV(context, batch uint64, numParallel int, kCacheType, vCacheType string, useFlashAttention ml.FlashAttentionType) (kv []uint64, partialOffload, fullOffload uint64) {
 	context *= uint64(numParallel)
 
 	embedding := f.KV().EmbeddingLength()
@@ -612,7 +623,10 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 
 	layers := f.Tensors().GroupLayers()
 
-	bytesPerElement := kvCacheBytesPerElement(kvCacheType)
+	// Split K and V bytes-per-element. Per-layer allocation sums K and V sides
+	// separately so an exact byte estimate holds for K != V configurations.
+	kBytesPerElement := kvCacheBytesPerElement(kCacheType)
+	vBytesPerElement := kvCacheBytesPerElement(vCacheType)
 
 	// Default for models unless special-cased below. These defaults mirror the
 	// cache usage in llama.cpp under the assumption that models without special
@@ -633,8 +647,12 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 		headsKVL := headsKVArr[i]
 		if headsL > 0 && headsKVL > 0 {
 			// full attention layer
-			// NOTE: Assumes uniform values for all attn layers
-			kv[i] = uint64(float64(context*(embeddingHeadsK+embeddingHeadsV)*headsKVL) * bytesPerElement)
+			// NOTE: Assumes uniform values for all attn layers.
+			// K and V accounted for independently so split K/V cache types
+			// (e.g. K=q8_0, V=q4_0) produce an exact byte estimate.
+			kBytes := uint64(float64(context*embeddingHeadsK*headsKVL) * kBytesPerElement)
+			vBytes := uint64(float64(context*embeddingHeadsV*headsKVL) * vBytesPerElement)
+			kv[i] = kBytes + vBytes
 			kvSizeAttn += kv[i]
 		} else {
 			// recurrent layer
@@ -749,7 +767,9 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 				// Every 6th layer is a global layer, which is the full context size that has already been set. The other
 				// layers are the smaller local (sliding) layers.
 				if (i+1)%gemma3GlobalCacheCount != 0 {
-					kv[i] = uint64(float64(slidingWindow*(embeddingHeadsK+embeddingHeadsV)*headsKV) * bytesPerElement)
+					kBytes := uint64(float64(slidingWindow*embeddingHeadsK*headsKV) * kBytesPerElement)
+					vBytes := uint64(float64(slidingWindow*embeddingHeadsV*headsKV) * vBytesPerElement)
+					kv[i] = kBytes + vBytes
 				}
 			}
 		}
@@ -828,7 +848,9 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 	case "gptoss", "gpt-oss":
 		kv = make([]uint64, f.KV().BlockCount())
 		for i := range kv {
-			kv[i] = uint64(float64((embeddingHeadsK+embeddingHeadsV)*headsKV) * bytesPerElement)
+			kBytesBase := uint64(float64(embeddingHeadsK*headsKV) * kBytesPerElement)
+			vBytesBase := uint64(float64(embeddingHeadsV*headsKV) * vBytesPerElement)
+			kv[i] = kBytesBase + vBytesBase
 			if i%2 == 0 {
 				kv[i] *= (uint64(numParallel)*4096 + batch)
 			} else {
@@ -846,13 +868,16 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 	return
 }
 
-// SupportsKVCacheType checks if the requested cache type is supported
+// SupportsKVCacheType checks if the requested cache type is supported. Returns
+// true for any known scalar name; runtime feasibility on a specific model is
+// further constrained by KVCacheTypeRequiresFlashAttention and by
+// ValidateKVCachePair (for split K/V).
 func (f GGML) SupportsKVCacheType(cacheType string) bool {
 	if cacheType == "" || cacheType == "f16" {
 		return true
 	}
 
-	return slices.Contains([]string{"q8_0", "q4_0"}, cacheType)
+	return slices.Contains([]string{"q8_0", "q4_0", "q5_0", "q5_1", "iq4_nl"}, cacheType)
 }
 
 // KVCacheTypeIsQuantized checks if the requested cache type is a quantized type
@@ -861,6 +886,34 @@ func (f GGML) KVCacheTypeIsQuantized(cacheType string) bool {
 		return false
 	}
 	return true
+}
+
+// KVCacheTypeRequiresFlashAttention reports whether the given cache type can
+// only be used with flash attention enabled. All currently supported quantized
+// scalar types require FA; f16 and f32 do not.
+func (f GGML) KVCacheTypeRequiresFlashAttention(cacheType string) bool {
+	return f.KVCacheTypeIsQuantized(cacheType)
+}
+
+// ValidateKVCachePair checks that the requested (K, V) cache type pair is
+// compatible. Callers should treat a non-nil error as "fall back to f16 on
+// both sides and log a warning". Pure scalar mixes (e.g. K=q8_0 + V=q4_0)
+// are allowed and pass through to llama.cpp's native type_k / type_v.
+func ValidateKVCachePair(k, v string) error {
+	known := func(s string) bool {
+		switch s {
+		case "", "f16", "q8_0", "q4_0", "q5_0", "q5_1", "iq4_nl":
+			return true
+		}
+		return false
+	}
+	if !known(k) {
+		return fmt.Errorf("unsupported K cache type %q", k)
+	}
+	if !known(v) {
+		return fmt.Errorf("unsupported V cache type %q", v)
+	}
+	return nil
 }
 
 // SupportsFlashAttention checks if the model supports flash attention
@@ -906,13 +959,21 @@ func (f GGML) FlashAttention() bool {
 	}, f.KV().String("general.architecture"))
 }
 
-// kvCacheBytesPerElement returns the number of bytes per element for a given KV cache type
+// kvCacheBytesPerElement returns the number of bytes per element for a given
+// cache type. With split K/V caches this is called separately for the K and V
+// sides; values are the per-side byte cost, not a K+V average.
 func kvCacheBytesPerElement(cacheType string) float64 {
 	switch cacheType {
 	case "q8_0":
 		return 1 // 1/2 of fp16
 	case "q4_0":
 		return 0.5 // 1/4 of fp16
+	case "q5_0":
+		return 0.625 // 5-bit + f16 block scale
+	case "q5_1":
+		return 0.75 // 5-bit + f16 scale + f16 min
+	case "iq4_nl":
+		return 0.5 // non-linear 4-bit, same footprint as q4_0
 	case "f32":
 		return 4 // f32 (default for recurrent)
 	default:
