@@ -606,6 +606,14 @@ type Runner struct {
 	MainGPU   int   `json:"main_gpu,omitempty"`
 	UseMMap   *bool `json:"use_mmap,omitempty"`
 	NumThread int   `json:"num_thread,omitempty"`
+
+	// KVCacheType allows per-request override of the OLLAMA_KV_CACHE_TYPE env.
+	// Valid values: "f16", "q8_0", "q4_0", "q5_0", "q5_1", "iq4_nl".
+	// Empty string = use OLLAMA_KV_CACHE_TYPE env (default behavior).
+	// Because this is part of [Runner], a request that asks for a different
+	// cache type than the currently loaded model will trigger a reload via
+	// the scheduler's needsReload() DeepEqual check on api.Runner.
+	KVCacheType string `json:"kv_cache_type,omitempty"`
 }
 
 // EmbedRequest is the request passed to [Client.Embed].

@@ -140,6 +140,26 @@ func LoadModel(model string, maxArraySize int) (*ggml.GGML, error) {
 	return ggml, err
 }
 
+// kvCacheTypeForRequest returns the KV cache type to apply for a load.
+// Per-request override (api.Options.KVCacheType) wins over OLLAMA_KV_CACHE_TYPE.
+// Empty override falls back to the env value, preserving the original behavior.
+// Returned value is always lower-cased to match downstream switch-case expectations.
+func kvCacheTypeForRequest(requestKvCacheType string) string {
+	if requestKvCacheType != "" {
+		return strings.ToLower(requestKvCacheType)
+	}
+	return strings.ToLower(envconfig.KvCacheType())
+}
+
+// kvCacheTypeSource is a small helper for log messages so operators can tell
+// whether a misconfiguration came from an API request or the global env.
+func kvCacheTypeSource(requestKvCacheType string) string {
+	if requestKvCacheType != "" {
+		return "request"
+	}
+	return "env"
+}
+
 // NewLlamaServer will run a server for the given GPUs
 func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath string, f *ggml.GGML, adapters, projectors []string, opts api.Options, numParallel int) (LlamaServer, error) {
 	var llamaModel *llama.Model
@@ -222,7 +242,8 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 		}
 	}
 
-	kvct := strings.ToLower(envconfig.KvCacheType())
+	kvct := kvCacheTypeForRequest(opts.KVCacheType)
+	kvctSource := kvCacheTypeSource(opts.KVCacheType)
 
 	if tok == nil {
 		flashAttention := ml.FlashAttentionAuto
@@ -237,18 +258,18 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 		if kvct != "" {
 			if f.KVCacheTypeIsQuantized(kvct) {
 				if flashAttention != ml.FlashAttentionEnabled {
-					slog.Warn("OLLAMA_FLASH_ATTENTION must be enabled to use a quantized OLLAMA_KV_CACHE_TYPE", "type", kvct)
+					slog.Warn("flash attention must be enabled to use a quantized kv cache type", "type", kvct, "source", kvctSource)
 					loadRequest.KvCacheType = ""
 				} else if f.SupportsKVCacheType(kvct) {
 					loadRequest.KvCacheType = kvct
 				} else {
-					slog.Warn("unsupported OLLAMA_KV_CACHE_TYPE", "type", kvct)
+					slog.Warn("unsupported kv cache type", "type", kvct, "source", kvctSource)
 				}
 			} else {
 				if f.SupportsKVCacheType(kvct) {
 					loadRequest.KvCacheType = kvct
 				} else {
-					slog.Warn("unsupported OLLAMA_KV_CACHE_TYPE", "type", kvct)
+					slog.Warn("unsupported kv cache type", "type", kvct, "source", kvctSource)
 				}
 			}
 		}
@@ -263,11 +284,11 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			// Enable if the requested and kv cache type is supported by the model
 			if f.SupportsKVCacheType(kvct) {
 				loadRequest.KvCacheType = kvct
-			} else {
-				slog.Warn("kv cache type not supported by model", "type", kvct)
+			} else if kvct != "" {
+				slog.Warn("kv cache type not supported by model", "type", kvct, "source", kvctSource)
 			}
 		} else if kvct != "" && kvct != "f16" {
-			slog.Warn("quantized kv cache requested but flash attention disabled", "type", kvct)
+			slog.Warn("quantized kv cache requested but flash attention disabled", "type", kvct, "source", kvctSource)
 		}
 	}
 
