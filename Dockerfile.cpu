@@ -1,0 +1,57 @@
+# vim: filetype=dockerfile
+#
+# Dockerfile.cpu — CPU-only build for Ollama KV Split. No CUDA, no ROCm.
+# Smaller image, suitable for development, CI, or low-memory hosts.
+
+ARG CMAKEVERSION=3.31.2
+ARG NINJAVERSION=1.12.1
+
+FROM --platform=linux/amd64 ubuntu:24.04 AS base
+ARG CMAKEVERSION
+ARG NINJAVERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip git ccache \
+        build-essential gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://github.com/Kitware/CMake/releases/download/v${CMAKEVERSION}/cmake-${CMAKEVERSION}-linux-$(uname -m).tar.gz \
+        | tar xz -C /usr/local --strip-components 1
+RUN curl -fsSL -o /tmp/ninja.zip https://github.com/ninja-build/ninja/releases/download/v${NINJAVERSION}/ninja-linux.zip \
+    && unzip /tmp/ninja.zip -d /usr/local/bin \
+    && rm /tmp/ninja.zip
+ENV CMAKE_GENERATOR=Ninja
+ENV LDFLAGS=-s
+
+FROM base AS cpu
+COPY CMakeLists.txt CMakePresets.json .
+COPY ml/backend/ggml/ggml ml/backend/ggml/ggml
+RUN --mount=type=cache,target=/root/.ccache \
+    cmake -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_CUDA=OFF \
+        -DGGML_NATIVE=OFF \
+    && cmake --build build --parallel $(nproc) \
+    && cmake --install build --strip --prefix=/tmp/ollama-install
+
+FROM base AS build
+WORKDIR /go/src/github.com/ollama/ollama
+COPY go.mod go.sum .
+RUN curl -fsSL https://golang.org/dl/go$(awk '/^go/ { print $2 }' go.mod).linux-amd64.tar.gz \
+        | tar xz -C /usr/local
+ENV PATH=/usr/local/go/bin:$PATH
+RUN go mod download
+COPY . .
+ENV CGO_ENABLED=1
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -buildmode=pie -buildvcs=false -ldflags="-w -s" -o /bin/ollama .
+
+FROM --platform=linux/amd64 ubuntu:24.04 AS runtime-cpu
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libopenblas0 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=cpu   /tmp/ollama-install/lib/ollama /usr/lib/ollama
+COPY --from=build /bin/ollama /usr/bin/ollama
+ENV OLLAMA_HOST=0.0.0.0:11434
+EXPOSE 11434
+ENTRYPOINT ["/usr/bin/ollama"]
+CMD ["serve"]

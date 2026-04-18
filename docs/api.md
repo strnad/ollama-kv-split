@@ -415,10 +415,28 @@ curl http://localhost:11434/api/generate -d '{
     "num_gpu": 1,
     "main_gpu": 0,
     "use_mmap": true,
-    "num_thread": 8
+    "num_thread": 8,
+    "kv_cache_type": "q8_0"
   }
 }'
 ```
+
+`kv_cache_type` overrides `OLLAMA_KV_CACHE_TYPE` for this request and applies the same cache type to both K and V. Valid values: `f16`, `q8_0`, `q4_0`, `q5_0`, `q5_1`, `iq4_nl`. Empty/omitted = use the env value. Switching cache type for an already-loaded model triggers a reload.
+
+For independent K and V precision (llama.cpp parity with `--cache-type-k` / `--cache-type-v`), use `k_cache_type` and `v_cache_type` instead:
+
+```shell
+curl http://localhost:11434/api/generate -d '{
+  "model": "llama3.2",
+  "prompt": "Why is the sky blue?",
+  "options": {
+    "k_cache_type": "q8_0",
+    "v_cache_type": "q4_0"
+  }
+}'
+```
+
+Asymmetric K/V trades V precision for memory while keeping K higher precision; K is more sensitive to quantization than V. When only `kv_cache_type` is set, both sides inherit it. When any of the new fields are set, they override `kv_cache_type` on that side. Corresponding env vars: `OLLAMA_K_CACHE_TYPE`, `OLLAMA_V_CACHE_TYPE` (the symmetric `OLLAMA_KV_CACHE_TYPE` remains as a fallback).
 
 ##### Response
 
