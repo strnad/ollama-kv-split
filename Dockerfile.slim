@@ -2,19 +2,17 @@
 #
 # Dockerfile.slim — single-arch CUDA build for Ollama KV Split.
 #
-# Defaults to sm_86 (RTX 30xx / Ampere). Override via
-#   --build-arg CUDA_ARCHITECTURES=89   (Ada / RTX 40xx)
-#   --build-arg CUDA_ARCHITECTURES=90   (Hopper H100)
+# Uses the upstream CMake preset "CUDA 12" but overrides CMAKE_CUDA_ARCHITECTURES
+# so only the target GPU arch is compiled. Defaults to sm_86 (RTX 30xx / Ampere).
+# Override via --build-arg CUDA_ARCHITECTURES=89 (Ada), 90 (Hopper), etc.
 #
-# Produces a much smaller image than the upstream multi-arch Dockerfile: only
-# the GPU code the target host can actually run is compiled.
+# Produces a much smaller image than the upstream multi-arch Dockerfile.
 
-ARG CUDAVERSION=12.8
 ARG CUDA_ARCHITECTURES=86
 ARG CMAKEVERSION=3.31.2
 ARG NINJAVERSION=1.12.1
 
-FROM --platform=linux/amd64 nvidia/cuda:${CUDAVERSION}.0-devel-ubuntu22.04 AS base
+FROM --platform=linux/amd64 nvidia/cuda:12.8.0-devel-ubuntu22.04 AS base
 ARG CMAKEVERSION
 ARG NINJAVERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,31 +26,25 @@ RUN curl -fsSL -o /tmp/ninja.zip https://github.com/ninja-build/ninja/releases/d
     && rm /tmp/ninja.zip
 ENV CMAKE_GENERATOR=Ninja
 ENV LDFLAGS=-s
+ENV PATH=/usr/local/cuda/bin:$PATH
 
 FROM base AS cuda
 ARG CUDA_ARCHITECTURES
-ENV PATH=/usr/local/cuda/bin:$PATH
 COPY CMakeLists.txt CMakePresets.json .
 COPY ml/backend/ggml/ggml ml/backend/ggml/ggml
+# Override the preset's multi-arch list with just the target arch.
 RUN --mount=type=cache,target=/root/.ccache \
-    cmake -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} \
-        -DGGML_CUDA=ON \
-        -DGGML_NATIVE=OFF \
-    && cmake --build build --parallel $(nproc) \
-    && cmake --install build --strip --prefix=/tmp/ollama-install
+    cmake --preset 'CUDA 12' -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} \
+    && cmake --build --preset 'CUDA 12' -- -l $(nproc) \
+    && cmake --install build --component CUDA --strip
 
 FROM base AS cpu
 COPY CMakeLists.txt CMakePresets.json .
 COPY ml/backend/ggml/ggml ml/backend/ggml/ggml
 RUN --mount=type=cache,target=/root/.ccache \
-    cmake -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DGGML_CUDA=OFF \
-        -DGGML_NATIVE=OFF \
-    && cmake --build build --parallel $(nproc) \
-    && cmake --install build --strip --prefix=/tmp/ollama-install
+    cmake --preset 'CPU' \
+    && cmake --build --preset 'CPU' -- -l $(nproc) \
+    && cmake --install build --component CPU --strip
 
 FROM base AS build
 WORKDIR /go/src/github.com/ollama/ollama
@@ -66,13 +58,13 @@ ENV CGO_ENABLED=1
 RUN --mount=type=cache,target=/root/.cache/go-build \
     go build -trimpath -buildmode=pie -buildvcs=false -ldflags="-w -s" -o /bin/ollama .
 
-FROM --platform=linux/amd64 nvidia/cuda:${CUDAVERSION}.0-runtime-ubuntu22.04 AS runtime-cuda
+FROM --platform=linux/amd64 nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime-cuda
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libopenblas0 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=cuda  /tmp/ollama-install/lib/ollama /usr/lib/ollama
-COPY --from=cpu   /tmp/ollama-install/lib/ollama /usr/lib/ollama
+COPY --from=cpu   dist/lib/ollama /usr/lib/ollama
+COPY --from=cuda  dist/lib/ollama /usr/lib/ollama
 COPY --from=build /bin/ollama /usr/bin/ollama
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility

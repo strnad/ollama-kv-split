@@ -25,12 +25,9 @@ FROM base AS cpu
 COPY CMakeLists.txt CMakePresets.json .
 COPY ml/backend/ggml/ggml ml/backend/ggml/ggml
 RUN --mount=type=cache,target=/root/.ccache \
-    cmake -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DGGML_CUDA=OFF \
-        -DGGML_NATIVE=OFF \
-    && cmake --build build --parallel $(nproc) \
-    && cmake --install build --strip --prefix=/tmp/ollama-install
+    cmake --preset 'CPU' \
+    && cmake --build --preset 'CPU' -- -l $(nproc) \
+    && cmake --install build --component CPU --strip
 
 FROM base AS build
 WORKDIR /go/src/github.com/ollama/ollama
@@ -49,7 +46,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libopenblas0 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=cpu   /tmp/ollama-install/lib/ollama /usr/lib/ollama
+COPY --from=cpu   dist/lib/ollama /usr/lib/ollama
 COPY --from=build /bin/ollama /usr/bin/ollama
 ENV OLLAMA_HOST=0.0.0.0:11434
 EXPOSE 11434
