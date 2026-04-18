@@ -111,7 +111,9 @@ func generateInteractive(cmd *cobra.Command, opts runOptions) error {
 		fmt.Fprintln(os.Stderr, "  /set parameter repeat_penalty <float> How strongly to penalize repetitions")
 		fmt.Fprintln(os.Stderr, "  /set parameter repeat_last_n <int>    Set how far back to look for repetitions")
 		fmt.Fprintln(os.Stderr, "  /set parameter num_gpu <int>          The number of layers to send to the GPU")
-		fmt.Fprintln(os.Stderr, "  /set parameter kv_cache_type <str>    Override OLLAMA_KV_CACHE_TYPE (f16/q8_0/q4_0/q5_0/q5_1/iq4_nl)")
+		fmt.Fprintln(os.Stderr, "  /set parameter kv_cache_type <str>    Override OLLAMA_KV_CACHE_TYPE, symmetric K=V (f16/q8_0/q4_0/q5_0/q5_1/iq4_nl)")
+		fmt.Fprintln(os.Stderr, "  /set parameter k_cache_type <str>     Override K cache type only (split K/V)")
+		fmt.Fprintln(os.Stderr, "  /set parameter v_cache_type <str>     Override V cache type only (split K/V)")
 		fmt.Fprintln(os.Stderr, "  /set parameter stop <string> <string> ...   Set the stop parameters")
 		fmt.Fprintln(os.Stderr, "")
 	}

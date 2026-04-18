@@ -832,7 +832,8 @@ func (s *Server) loadModel(
 	lpath []string,
 	ppath string,
 	kvSize int,
-	kvCacheType string,
+	kCacheType string,
+	vCacheType string,
 	flashAttention ml.FlashAttentionType,
 	threads int,
 	multiUserCache bool,
@@ -843,7 +844,7 @@ func (s *Server) loadModel(
 		panic(err)
 	}
 
-	ctxParams := llama.NewContextParams(kvSize, s.batchSize, s.parallel, threads, flashAttention, kvCacheType)
+	ctxParams := llama.NewContextParams(kvSize, s.batchSize, s.parallel, threads, flashAttention, kCacheType, vCacheType)
 	s.lc, err = llama.NewContextWithModel(s.model, ctxParams)
 	if err != nil {
 		panic(err)
@@ -930,8 +931,19 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
+		// Back-fill KCacheType/VCacheType from legacy KvCacheType when the
+		// split fields are empty, so older callers still get symmetric K=V.
+		kType := req.KCacheType
+		vType := req.VCacheType
+		if kType == "" {
+			kType = req.KvCacheType
+		}
+		if vType == "" {
+			vType = req.KvCacheType
+		}
+
 		s.status = llm.ServerStatusLoadingModel
-		go s.loadModel(params, s.modelPath, req.LoraPath, req.ProjectorPath, req.KvSize, req.KvCacheType, req.FlashAttention, req.NumThreads, req.MultiUserCache)
+		go s.loadModel(params, s.modelPath, req.LoraPath, req.ProjectorPath, req.KvSize, kType, vType, req.FlashAttention, req.NumThreads, req.MultiUserCache)
 
 	case llm.LoadOperationClose:
 		// No-op for us

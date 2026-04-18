@@ -119,7 +119,10 @@ type ContextParams struct {
 	c C.struct_llama_context_params
 }
 
-func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, flashAttention ml.FlashAttentionType, kvCacheType string) ContextParams {
+// NewContextParams builds llama.cpp context parameters with independent K and
+// V cache types (mirroring --cache-type-k / --cache-type-v). An empty string
+// for either side falls back to f16.
+func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, flashAttention ml.FlashAttentionType, kCacheType, vCacheType string) ContextParams {
 	params := C.llama_context_default_params()
 	params.n_ctx = C.uint(numCtx)
 	params.n_batch = C.uint(batchSize * numSeqMax)
@@ -136,8 +139,8 @@ func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, fla
 	case ml.FlashAttentionAuto:
 		params.flash_attn_type = int32(C.LLAMA_FLASH_ATTN_TYPE_AUTO)
 	}
-	params.type_k = kvCacheTypeFromStr(strings.ToLower(kvCacheType))
-	params.type_v = kvCacheTypeFromStr(strings.ToLower(kvCacheType))
+	params.type_k = kvCacheTypeFromStr(strings.ToLower(kCacheType))
+	params.type_v = kvCacheTypeFromStr(strings.ToLower(vCacheType))
 
 	return ContextParams{c: params}
 }
@@ -153,6 +156,12 @@ func kvCacheTypeFromStr(s string) C.enum_ggml_type {
 		return C.GGML_TYPE_Q8_0
 	case "q4_0":
 		return C.GGML_TYPE_Q4_0
+	case "q5_0":
+		return C.GGML_TYPE_Q5_0
+	case "q5_1":
+		return C.GGML_TYPE_Q5_1
+	case "iq4_nl":
+		return C.GGML_TYPE_IQ4_NL
 	default:
 		return C.GGML_TYPE_F16
 	}

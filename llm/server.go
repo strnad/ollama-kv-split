@@ -160,6 +160,44 @@ func kvCacheTypeSource(requestKvCacheType string) string {
 	return "env"
 }
 
+// kvCacheTypesForRequest resolves the (K, V) cache type pair from four
+// sources, in priority order:
+//
+//  1. per-request KCacheType / VCacheType (split, llama.cpp parity)
+//  2. per-request KVCacheType shortcut (applied to both sides)
+//  3. OLLAMA_K_CACHE_TYPE / OLLAMA_V_CACHE_TYPE env vars
+//  4. OLLAMA_KV_CACHE_TYPE env (applied to both sides)
+//
+// Both returned values are lower-cased. An empty string on either side means
+// "default to f16".
+func kvCacheTypesForRequest(opts api.Options) (k, v string) {
+	low := strings.ToLower
+	switch {
+	case opts.KCacheType != "" || opts.VCacheType != "":
+		k, v = low(opts.KCacheType), low(opts.VCacheType)
+	case opts.KVCacheType != "":
+		k, v = low(opts.KVCacheType), low(opts.KVCacheType)
+	}
+
+	if k == "" {
+		k = low(envconfig.KCacheType())
+	}
+	if v == "" {
+		v = low(envconfig.VCacheType())
+	}
+	if k == "" && v == "" {
+		sym := low(envconfig.KvCacheType())
+		k, v = sym, sym
+	}
+	if k == "" && v != "" {
+		k = v
+	}
+	if v == "" && k != "" {
+		v = k
+	}
+	return k, v
+}
+
 // NewLlamaServer will run a server for the given GPUs
 func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath string, f *ggml.GGML, adapters, projectors []string, opts api.Options, numParallel int) (LlamaServer, error) {
 	var llamaModel *llama.Model
@@ -242,8 +280,23 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 		}
 	}
 
+	kK, kV := kvCacheTypesForRequest(opts)
 	kvct := kvCacheTypeForRequest(opts.KVCacheType)
 	kvctSource := kvCacheTypeSource(opts.KVCacheType)
+
+	// Validate the resolved pair up front. A hard error falls both sides back
+	// to f16 with a warning so the load still proceeds.
+	if err := ggml.ValidateKVCachePair(kK, kV); err != nil {
+		slog.Warn("invalid kv cache pair, falling back to f16", "k", kK, "v", kV, "error", err)
+		kK, kV = "", ""
+	}
+
+	// Legacy KvCacheType summary: matches K when symmetric, else the K side.
+	if kK == kV {
+		kvct = kK
+	} else if kK != "" {
+		kvct = kK
+	}
 
 	if tok == nil {
 		flashAttention := ml.FlashAttentionAuto
@@ -255,23 +308,28 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			}
 		}
 
-		if kvct != "" {
-			if f.KVCacheTypeIsQuantized(kvct) {
+		applySide := func(side, cacheType string) string {
+			if cacheType == "" {
+				return ""
+			}
+			if f.KVCacheTypeIsQuantized(cacheType) {
 				if flashAttention != ml.FlashAttentionEnabled {
-					slog.Warn("flash attention must be enabled to use a quantized kv cache type", "type", kvct, "source", kvctSource)
-					loadRequest.KvCacheType = ""
-				} else if f.SupportsKVCacheType(kvct) {
-					loadRequest.KvCacheType = kvct
-				} else {
-					slog.Warn("unsupported kv cache type", "type", kvct, "source", kvctSource)
-				}
-			} else {
-				if f.SupportsKVCacheType(kvct) {
-					loadRequest.KvCacheType = kvct
-				} else {
-					slog.Warn("unsupported kv cache type", "type", kvct, "source", kvctSource)
+					slog.Warn("flash attention must be enabled to use a quantized kv cache type", "side", side, "type", cacheType, "source", kvctSource)
+					return ""
 				}
 			}
+			if !f.SupportsKVCacheType(cacheType) {
+				slog.Warn("unsupported kv cache type", "side", side, "type", cacheType, "source", kvctSource)
+				return ""
+			}
+			return cacheType
+		}
+		loadRequest.KCacheType = applySide("k", kK)
+		loadRequest.VCacheType = applySide("v", kV)
+		if loadRequest.KCacheType == loadRequest.VCacheType {
+			loadRequest.KvCacheType = loadRequest.KCacheType
+		} else {
+			loadRequest.KvCacheType = loadRequest.KCacheType
 		}
 		loadRequest.FlashAttention = flashAttention
 	} else {
@@ -282,10 +340,20 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 
 			// Flash Attention also supports kv cache quantization
 			// Enable if the requested and kv cache type is supported by the model
-			if f.SupportsKVCacheType(kvct) {
-				loadRequest.KvCacheType = kvct
-			} else if kvct != "" {
-				slog.Warn("kv cache type not supported by model", "type", kvct, "source", kvctSource)
+			if f.SupportsKVCacheType(kK) && f.SupportsKVCacheType(kV) {
+				loadRequest.KCacheType = kK
+				loadRequest.VCacheType = kV
+				loadRequest.KvCacheType = kK
+			} else {
+				if kK != "" && !f.SupportsKVCacheType(kK) {
+					slog.Warn("kv cache type not supported by model", "side", "k", "type", kK, "source", kvctSource)
+				}
+				if kV != "" && !f.SupportsKVCacheType(kV) {
+					slog.Warn("kv cache type not supported by model", "side", "v", "type", kV, "source", kvctSource)
+				}
+			}
+			if kK != kV {
+				slog.Info("split K/V cache types requested", "k", kK, "v", kV)
 			}
 		} else if kvct != "" && kvct != "f16" {
 			slog.Warn("quantized kv cache requested but flash attention disabled", "type", kvct, "source", kvctSource)
@@ -510,7 +578,14 @@ type LoadRequest struct {
 	BatchSize      int
 	FlashAttention ml.FlashAttentionType
 	KvSize         int
-	KvCacheType    string
+	// KvCacheType is retained as a best-effort summary of the resolved K/V
+	// cache type (matches the K side when K == V). New code should read
+	// KCacheType and VCacheType directly.
+	KvCacheType string
+	// KCacheType and VCacheType carry the resolved per-side cache types.
+	// Either can be empty, which signals "use f16" to the runner.
+	KCacheType     string
+	VCacheType     string
 	NumThreads     int
 	GPULayers      ml.GPULayersList
 	MultiUserCache bool

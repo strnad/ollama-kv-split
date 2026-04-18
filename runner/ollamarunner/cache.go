@@ -31,7 +31,7 @@ type InputCache struct {
 	cache kvcache.Cache
 }
 
-func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
+func NewInputCache(model model.Model, kCacheType, vCacheType string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
 	numCtx := kvSize / int32(numSlots)
 
 	if int(numCtx) < batchSize {
@@ -46,7 +46,16 @@ func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots
 
 	cache := model.Config().Cache
 	if cache != nil {
-		cache.Init(model.Backend(), kvCacheTypeFromStr(kvCacheType), numSlots, int(numCtx), batchSize)
+		kType := kvCacheTypeFromStr(kCacheType)
+		vType := kvCacheTypeFromStr(vCacheType)
+		// Propagate per-side dtypes before Init so cache backends that support
+		// split K/V allocate the right element type; backends that don't look
+		// at DTypeK/DTypeV simply fall back to the symmetric dtype passed to
+		// Init (chosen here to match K, which is the more common primary type).
+		if setter, ok := cache.(interface{ SetDTypes(k, v ml.DType) }); ok {
+			setter.SetDTypes(kType, vType)
+		}
+		cache.Init(model.Backend(), kType, numSlots, int(numCtx), batchSize)
 	}
 
 	return &InputCache{
@@ -64,6 +73,12 @@ func kvCacheTypeFromStr(s string) ml.DType {
 		return ml.DTypeQ80
 	case "q4_0":
 		return ml.DTypeQ40
+	case "q5_0":
+		return ml.DTypeQ50
+	case "q5_1":
+		return ml.DTypeQ51
+	case "iq4_nl":
+		return ml.DTypeIQ4NL
 	default:
 		return ml.DTypeF16
 	}

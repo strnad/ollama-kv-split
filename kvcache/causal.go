@@ -18,7 +18,15 @@ type shiftFn func(ctx ml.Context, layer int, key, shift ml.Tensor) (ml.Tensor, e
 // The tensors are of shape embed dim, kv heads, batch size
 // The mask is of shape history size, batch size
 type Causal struct {
+	// DType is the legacy symmetric K/V cache element type. When DTypeK or
+	// DTypeV are unset (ml.DTypeOther) the cache falls back to DType for that
+	// side, preserving the upstream single-type behavior.
 	DType ml.DType
+	// DTypeK and DTypeV are the per-side cache element types for split K/V
+	// (parity with llama.cpp's --cache-type-k / --cache-type-v). Set via
+	// SetDTypes before Init.
+	DTypeK ml.DType
+	DTypeV ml.DType
 
 	// swaWindowSize is the number of tokens that will be included in the mask
 	// during attention operations. swaMemorySize is the number of tokens that
@@ -176,9 +184,23 @@ func (c *Causal) Init(backend ml.Backend, dtype ml.DType, maxSequences, capacity
 	c.cells = make([]cacheCell, cacheSize)
 
 	c.DType = dtype
+	if c.DTypeK == ml.DTypeOther {
+		c.DTypeK = dtype
+	}
+	if c.DTypeV == ml.DTypeOther {
+		c.DTypeV = dtype
+	}
 	c.cellRanges = make(map[int]cellRange)
 	c.backend = backend
 	c.maxBatch = maxBatch
+}
+
+// SetDTypes wires per-side K and V cache element types before Init runs.
+// Either side may be ml.DTypeOther to inherit the symmetric dtype passed to
+// Init.
+func (c *Causal) SetDTypes(k, v ml.DType) {
+	c.DTypeK = k
+	c.DTypeV = v
 }
 
 func (c *Causal) SetConfig(config ml.CacheConfig) {
@@ -461,14 +483,14 @@ func (c *Causal) Put(ctx ml.Context, key, value ml.Tensor) {
 	}
 
 	if _, ok := c.keys[c.curLayer]; !ok {
-		c.keys[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, kHeadDim, numKVHeads, len(c.cells))
+		c.keys[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DTypeK, kHeadDim, numKVHeads, len(c.cells))
 	}
 
 	if _, ok := c.values[c.curLayer]; !ok {
 		if c.config.PermutedV {
-			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, len(c.cells), vHeadDim, numKVHeads)
+			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DTypeV, len(c.cells), vHeadDim, numKVHeads)
 		} else {
-			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, vHeadDim, numKVHeads, len(c.cells))
+			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DTypeV, vHeadDim, numKVHeads, len(c.cells))
 		}
 	}
 

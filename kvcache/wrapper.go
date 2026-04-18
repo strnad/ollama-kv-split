@@ -29,6 +29,17 @@ func (c *WrapperCache) Init(backend ml.Backend, dtype ml.DType, maxSequences, ca
 	}
 }
 
+// SetDTypes propagates per-side K/V dtypes to every wrapped cache that knows
+// how to use them (typically *Causal). Sub-caches that don't implement
+// SetDTypes are skipped — they fall back to the symmetric dtype passed to Init.
+func (c *WrapperCache) SetDTypes(k, v ml.DType) {
+	for _, cache := range c.caches {
+		if setter, ok := cache.(interface{ SetDTypes(k, v ml.DType) }); ok {
+			setter.SetDTypes(k, v)
+		}
+	}
+}
+
 func (c *WrapperCache) SetConfig(config ml.CacheConfig) {
 	for _, cache := range c.caches {
 		cache.SetConfig(config)

@@ -1116,6 +1116,12 @@ func (t *Tensor) DType() ml.DType {
 		return ml.DTypeQ80
 	case C.GGML_TYPE_Q4_0:
 		return ml.DTypeQ40
+	case C.GGML_TYPE_Q5_0:
+		return ml.DTypeQ50
+	case C.GGML_TYPE_Q5_1:
+		return ml.DTypeQ51
+	case C.GGML_TYPE_IQ4_NL:
+		return ml.DTypeIQ4NL
 	case C.GGML_TYPE_I32:
 		return ml.DTypeI32
 	case C.GGML_TYPE_MXFP4:
@@ -1135,6 +1141,12 @@ func ggmlDType(dtype ml.DType) uint32 {
 		return C.GGML_TYPE_Q8_0
 	case ml.DTypeQ40:
 		return C.GGML_TYPE_Q4_0
+	case ml.DTypeQ50:
+		return C.GGML_TYPE_Q5_0
+	case ml.DTypeQ51:
+		return C.GGML_TYPE_Q5_1
+	case ml.DTypeIQ4NL:
+		return C.GGML_TYPE_IQ4_NL
 	case ml.DTypeI32:
 		return C.GGML_TYPE_I32
 	case ml.DTypeMXFP4:

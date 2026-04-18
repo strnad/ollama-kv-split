@@ -331,7 +331,7 @@ func Dump(ctx Context, t Tensor, optsFuncs ...DumpOptions) string {
 		return dump[[]float32](ctx, t, opts.EdgeItems, func(f float32) string {
 			return strconv.FormatFloat(float64(f), 'f', opts.Precision, 32)
 		})
-	case DTypeF16, DTypeQ80, DTypeQ40:
+	case DTypeF16, DTypeQ80, DTypeQ40, DTypeQ50, DTypeQ51, DTypeIQ4NL:
 		f32 := ctx.Input().Empty(DTypeF32, t.Shape()...)
 		f32 = t.Copy(ctx, f32)
 		return dump[[]float32](ctx, f32, opts.EdgeItems, func(f float32) string {
@@ -409,6 +409,12 @@ const (
 	DTypeQ40
 	DTypeI32
 	DTypeMXFP4
+	// New engine scalar cache types mirroring llama.cpp --cache-type-k/v.
+	// Back-end support is gated per build; the runner falls back to f16 when
+	// the backend rejects the type.
+	DTypeQ50
+	DTypeQ51
+	DTypeIQ4NL
 )
 
 type SamplingMode int
